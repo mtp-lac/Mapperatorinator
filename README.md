@@ -84,7 +84,31 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Web GUI (Recommended)
+## Desktop GUI
+
+The native desktop app provides generation, metadata, style descriptors, and advanced inference controls, using the Web UI as a reference. It runs inference in a separate process so the window stays responsive, with live logs, cancellation, and shortcuts to the generated files.
+
+Install the desktop dependency **in the same Python environment as the inference dependencies**:
+
+```sh
+python -m pip install -r requirements-desktop.txt
+python desktop-ui.py
+```
+
+On Windows, you can also double-click `desktop-ui.bat`. It uses `.venv` if present, otherwise the `python` on your PATH. Linux and macOS users can run `python desktop-ui.py` from their activated environment. No local web server is needed.
+
+- **Generation:** Browse for or drag in an audio file or reference `.osu` file. Choose the model, game mode, star rating, and style year. Leave output blank to save beside the reference or audio file. A reference can supply audio and metadata; **Fill fields from reference** copies its available values into the form.
+- **Metadata and Style:** Edit song information and difficulty settings, and optionally choose a local LoRA adapter. Descriptors appear in grouped cards matching the Web UI's catalog for the selected model and game mode. Click a checkbox or press Space to cycle **Disabled → Encourage (+) → Discourage (−) → Disabled**. Disabled descriptors are omitted from generation. V30 has no descriptors; V28/V29/V31 use OMDB descriptors, while V32/V32-mini use ruleset-filtered user tags. Hidden selections are remembered when switching models or modes, but only currently available descriptors are exported or submitted. Search filters the cards without changing selections. Negative guidance requires a guidance scale above 1 and equal Encourage and Discourage counts when Discourage selections are present.
+- **Advanced:** Set the seed, sampling controls, generation range, device, and precision. Blank optional fields inherit reference values or backend defaults.
+- **Generate:** Click **Generate beatmap** (`Ctrl+Enter`) and follow the activity panel. **Cancel** stops the worker. The app runs one generation at a time and releases the worker's model memory on exit; models load again for each run. The first run may download weights.
+- **Settings:** Import and export JSON settings, including exports from the Web UI. The app remembers settings and window size using the operating system's application settings storage. Generation logs are saved under the operating system's application data directory; **Open log** opens the current run's file.
+
+Selecting **Overwrite reference file** requires merge mode and prompts for confirmation before starting. Cancellation stops computation but does not remove files already written. Closing the app during a run prompts before stopping its worker.
+
+The desktop window can open without loading PyTorch; generation still requires the full inference environment, audio dependencies, and model access described above.
+
+## Web GUI
+
 
 For a more user-friendly experience, consider using the Web UI. It provides a graphical interface to configure generation parameters, start the process, and monitor the output.
 
@@ -111,7 +135,7 @@ The Web UI acts as a convenient wrapper around the `inference.py` script. For ad
 
 ## Command-Line Inference
 
-For users who prefer the command line or need access to advanced configurations, follow the steps below. **Note:** For a simpler graphical interface, please see the [Web UI (Recommended)](#web-ui-recommended) section above.
+For users who prefer the command line or need access to advanced configurations, follow the steps below. For a graphical interface, see the [Desktop GUI](#desktop-gui) or [Web GUI](#web-gui) sections above.
 
 Run `inference.py` and pass in some arguments to generate beatmaps. For this use [Hydra override syntax](https://hydra.cc/docs/advanced/override_grammar/basic/). See `configs/inference/default.yaml` for all available parameters.
 ```

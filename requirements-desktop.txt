@@ -1,0 +1,2 @@
+# Install alongside requirements.txt in the same Python environment.
+pyqt6>=6.8,<7
