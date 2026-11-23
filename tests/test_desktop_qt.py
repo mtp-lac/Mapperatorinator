@@ -1,5 +1,6 @@
 """Qt integration tests; no model weights, network, or accelerator required."""
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -182,6 +183,66 @@ class WindowTests(unittest.TestCase):
                 self.assertIn(expected, text)
         finally:
             dialog.deleteLater()
+
+    def test_bf16_compute_option_and_preference_caching(self):
+        precision_box = self.window.fields["precision"]
+        auto_idx = precision_box.findData("auto")
+        self.assertGreaterEqual(auto_idx, 0)
+        self.assertIn("BF16", precision_box.itemText(auto_idx))
+
+        bf16_payload = {
+            "supported": True,
+            "gpu_name": "RTX Test",
+            "compute_capability": "8.9",
+            "reason": "GPU supports bf16",
+        }
+        with (
+            patch("desktop.app.check_bf16_support", return_value=bf16_payload) as mock_bf16,
+            patch("desktop.app.optimal_compute_settings", return_value={"device": "cuda", "precision": "bf16"}) as mock_opt,
+        ):
+            self.window.detect_optimal_compute(refresh=True)
+        mock_bf16.assert_called_once_with(use_cache=False)
+        mock_opt.assert_called_once_with(use_cache=False)
+        self.assertEqual(self.window.settings()["device"], "cuda")
+        self.assertEqual(self.window.settings()["precision"], "bf16")
+        self.assertIn("RTX Test", self.window.compute_status_label.text())
+
+        cached_raw = self.window.preferences.value("cachedOptimalCompute", "")
+        self.assertTrue(cached_raw)
+        self.assertEqual(json.loads(cached_raw)["precision"], "bf16")
+
+        # Reopening with restore=True loads the cached settings without re-probing hardware.
+        with (
+            patch("desktop.app.check_bf16_support", side_effect=AssertionError("Should use cached setting")),
+            patch("desktop.app.optimal_compute_settings", side_effect=AssertionError("Should use cached setting")),
+        ):
+            restored = MainWindow(restore=True)
+        try:
+            self.assertEqual(restored.settings()["device"], "cuda")
+            self.assertEqual(restored.settings()["precision"], "bf16")
+            self.assertIn("RTX Test", restored.compute_status_label.text())
+        finally:
+            restored.job.shutdown()
+            restored.deleteLater()
+
+        # Clearing QSettings runs detection on first restore=True launch and caches it.
+        self.window.preferences.clear()
+        self.window.preferences.sync()
+        with (
+            patch("desktop.app.check_bf16_support", return_value=bf16_payload) as mock_bf16_first,
+            patch("desktop.app.optimal_compute_settings", return_value={"device": "cuda", "precision": "bf16"}) as mock_opt_first,
+        ):
+            first_launch = MainWindow(restore=True)
+        try:
+            mock_bf16_first.assert_called_once()
+            mock_opt_first.assert_called_once()
+            self.assertEqual(first_launch.settings()["device"], "cuda")
+            self.assertEqual(first_launch.settings()["precision"], "bf16")
+            self.assertTrue(first_launch.preferences.value("generationSettings", ""))
+            self.assertTrue(first_launch.preferences.value("cachedOptimalCompute", ""))
+        finally:
+            first_launch.job.shutdown()
+            first_launch.deleteLater()
 
 
 class JobTests(unittest.TestCase):

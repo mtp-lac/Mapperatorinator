@@ -262,8 +262,10 @@ def validate_settings(settings: dict, check_paths=True) -> dict:
     for key in _TEXT:
         result[key] = _text(settings[key], key)
     precision = _text(settings["precision"], "precision")
-    if precision not in {"fp32", "fp16", "bf16", "amp"}:
-        raise ValueError("precision must be fp32, fp16, bf16, or amp")
+    if precision not in {"auto", "fp32", "fp16", "bf16", "amp"}:
+        raise ValueError("precision must be auto, fp32, fp16, bf16, or amp")
+    if precision == "auto":
+        precision = "bf16" if check_bf16_support()["supported"] else "fp32"
     device = _text(settings["device"], "device")
     if device is None or not re.fullmatch(r"auto|cpu|mps|cuda(?::\d+)?", device):
         raise ValueError("device must be auto, cpu, mps, cuda, or cuda:<index>")
@@ -349,3 +351,93 @@ def descriptor_catalog(model, gamemode=None) -> list[dict]:
             "description": tag.get("description") or "", "ruleset_id": ruleset,
         })
     return [descriptor for items in groups.values() for descriptor in items]
+
+
+_BF16_CACHE = None
+_COMPUTE_CACHE = None
+
+
+def check_bf16_support(use_cache=True) -> dict:
+    """Test whether CUDA BF16 precision is natively supported, caching the result by default."""
+    global _BF16_CACHE
+    if use_cache and _BF16_CACHE is not None:
+        return dict(_BF16_CACHE)
+
+    try:
+        import torch
+    except Exception:
+        result = {"supported": False, "gpu_name": "", "compute_capability": "", "reason": "PyTorch not available"}
+        _BF16_CACHE = dict(result)
+        return dict(result)
+
+    try:
+        if not torch.cuda.is_available():
+            result = {"supported": False, "gpu_name": "", "compute_capability": "", "reason": "CUDA not available"}
+            _BF16_CACHE = dict(result)
+            return dict(result)
+
+        gpu_name = ""
+        compute_capability = ""
+        try:
+            props = torch.cuda.get_device_properties(0)
+            gpu_name = getattr(props, "name", "") or ""
+            major = getattr(props, "major", None)
+            minor = getattr(props, "minor", None)
+            if major is not None and minor is not None:
+                compute_capability = f"{major}.{minor}"
+        except Exception:
+            pass
+
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            try:
+                supported = bool(torch.cuda.is_bf16_supported(including_emulation=False))
+            except TypeError:
+                supported = bool(torch.cuda.is_bf16_supported())
+        elif compute_capability:
+            supported = int(compute_capability.split(".", 1)[0]) >= 8
+        else:
+            supported = False
+
+        if supported:
+            reason = "GPU supports bf16"
+        elif compute_capability:
+            reason = f"GPU compute capability {compute_capability} does not natively support bf16"
+        else:
+            reason = "GPU does not natively support bf16"
+        result = {
+            "supported": supported,
+            "gpu_name": gpu_name,
+            "compute_capability": compute_capability,
+            "reason": reason,
+        }
+    except Exception as exc:
+        result = {"supported": False, "gpu_name": "", "compute_capability": "", "reason": str(exc)}
+
+    _BF16_CACHE = dict(result)
+    return dict(result)
+
+
+def optimal_compute_settings(use_cache=True) -> dict:
+    """Detect the optimal device and precision for the current machine, caching by default."""
+    global _COMPUTE_CACHE
+    if use_cache and _COMPUTE_CACHE is not None:
+        return dict(_COMPUTE_CACHE)
+
+    bf16_info = check_bf16_support(use_cache=use_cache)
+    result = {"device": "cpu", "precision": "fp32"}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            result = {"device": "cuda", "precision": "bf16" if bf16_info["supported"] else "fp32"}
+        else:
+            mps = getattr(torch, "mps", None)
+            mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+            if (mps is not None and mps.is_available()) or (mps_backend is not None and mps_backend.is_available()):
+                result = {"device": "mps", "precision": "fp32"}
+    except Exception:
+        pass
+
+    _COMPUTE_CACHE = dict(result)
+    return dict(result)
+

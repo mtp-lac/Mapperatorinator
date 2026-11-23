@@ -182,6 +182,55 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(self.validate(export_osz="false")["export_osz"])
         self.assertTrue(self.validate(hitsounded="on")["hitsounded"])
 
+    def test_bf16_support_configuration_option_and_caching(self):
+        prev_bf16 = core._BF16_CACHE
+        prev_compute = core._COMPUTE_CACHE
+        try:
+            state = {"cuda": True, "mps": False, "bf16": True, "name": "RTX Test 4090", "major": 8, "minor": 9}
+            cuda_mod = types.SimpleNamespace(
+                is_available=lambda: state["cuda"],
+                is_bf16_supported=lambda including_emulation=False: state["bf16"],
+                get_device_properties=lambda idx: types.SimpleNamespace(
+                    name=state["name"], major=state["major"], minor=state["minor"]
+                ),
+            )
+            torch_stub = types.SimpleNamespace(
+                cuda=cuda_mod,
+                mps=types.SimpleNamespace(is_available=lambda: state["mps"]),
+            )
+            with patch.dict(sys.modules, {"torch": torch_stub}):
+                core._BF16_CACHE = None
+                core._COMPUTE_CACHE = None
+                info = core.check_bf16_support(use_cache=False)
+                self.assertTrue(info["supported"])
+                self.assertEqual(info["gpu_name"], "RTX Test 4090")
+                self.assertEqual(info["compute_capability"], "8.9")
+                self.assertEqual(self.validate(precision="auto")["precision"], "bf16")
+                self.assertEqual(core.optimal_compute_settings(use_cache=False), {"device": "cuda", "precision": "bf16"})
+
+                # Subsequent cached calls return the cached values even if hardware probe changes.
+                state.update(bf16=False, name="Legacy GPU", major=7, minor=5)
+                cached = core.check_bf16_support(use_cache=True)
+                self.assertTrue(cached["supported"])
+                self.assertEqual(cached["gpu_name"], "RTX Test 4090")
+                self.assertEqual(core.optimal_compute_settings(use_cache=True), {"device": "cuda", "precision": "bf16"})
+
+                # Refreshing with use_cache=False updates the cached result.
+                refreshed = core.check_bf16_support(use_cache=False)
+                self.assertFalse(refreshed["supported"])
+                self.assertEqual(refreshed["gpu_name"], "Legacy GPU")
+                self.assertEqual(self.validate(precision="auto")["precision"], "fp32")
+                self.assertEqual(core.optimal_compute_settings(use_cache=False), {"device": "cuda", "precision": "fp32"})
+
+                # MPS and CPU fallbacks.
+                state.update(cuda=False, mps=True)
+                self.assertEqual(core.optimal_compute_settings(use_cache=False), {"device": "mps", "precision": "fp32"})
+                state.update(cuda=False, mps=False)
+                self.assertEqual(core.optimal_compute_settings(use_cache=False), {"device": "cpu", "precision": "fp32"})
+        finally:
+            core._BF16_CACHE = prev_bf16
+            core._COMPUTE_CACHE = prev_compute
+
 
 class ReferenceTests(unittest.TestCase):
     def setUp(self):
