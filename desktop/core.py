@@ -10,9 +10,9 @@ import re
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = {
     "v28": "Mapperatorinator V28",
-    "v29": "Mapperatorinator V29",
-    "v30": "Mapperatorinator V30",
-    "v31": "Mapperatorinator V31",
+    "v29": "Mapperatorinator V29 (Supports gamemodes and descriptors)",
+    "v30": "Mapperatorinator V30 (Previous best model)",
+    "v31": "Mapperatorinator V31 (Slightly more accurate than V29)",
     "v32-mini": "Mapperatorinator V32-mini",
     "v32": "Mapperatorinator V32 (Best model)",
 }

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from desktop.core import DEFAULTS, MODELS, ROOT, export_settings, load_settings, read_reference, validate_settings
+from desktop.credits import CreditsDialog
 from desktop.descriptors import DescriptorPanel
 from desktop.jobs import InferenceJob
 
@@ -55,6 +56,11 @@ QCheckBox::indicator { width: 16px; height: 16px; }
 QFrame#descriptorCard { background: #202124; border: 1px solid #34373e; border-radius: 4px; }
 QLabel#descriptorHeading { font-size: 16px; font-weight: 700; padding-bottom: 6px; }
 QCheckBox#descriptor { spacing: 9px; padding: 4px 0; font-weight: 600; }
+QFrame#creditHeader { background: #1b1e26; border-bottom: 1px solid #303540; }
+QFrame#creditFooter { background: #1b1e26; border-top: 1px solid #303540; }
+QFrame#creditCard { background: #202124; border: 1px solid #34373e; border-radius: 6px; }
+QLabel#creditHeading { font-size: 15px; font-weight: 700; color: #f3a6c8; padding-bottom: 2px; }
+QLabel#creditEntry { color: #e7e9ef; line-height: 1.4; }
 QProgressBar { border: 1px solid #3b4251; background: #242831; border-radius: 4px; min-height: 12px; text-align: center; }
 QProgressBar::chunk { background: #cc87b1; border-radius: 3px; }
 QSplitter::handle { background: #303540; width: 1px; }
@@ -170,14 +176,12 @@ class MainWindow(QMainWindow):
         run.triggered.connect(self.start_generation)
         self.addAction(run)
         help_menu = self.menuBar().addMenu("&Help")
-        about = help_menu.addAction("About Mapperatorinator")
-        about.triggered.connect(lambda: QMessageBox.about(
-            self, "Mapperatorinator Desktop",
-            "Mapperatorinator Desktop\n\nGenerate osu! beatmaps with the existing Mapperatorinator models.\n"
-            "Use a reference .osu file to inherit metadata or timing.\n\n"
-            "Always disclose the use of AI in your beatmaps.\n\n"
-            "The first generation may download model weights. See README.md for installation and generation tips.",
-        ))
+        self.about_action = help_menu.addAction("About / Credits")
+        self.about_action.triggered.connect(self.show_credits)
+
+    def show_credits(self):
+        dialog = CreditsDialog(self)
+        return dialog.exec()
 
     def _build_ui(self):
         central = QWidget()

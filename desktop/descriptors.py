@@ -38,8 +38,13 @@ class DescriptorCheckBox(QCheckBox):
         option = QStyleOptionButton()
         self.initStyleOption(option)
         rect = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
+        label_option = QStyleOptionButton(option)
+        if self.layoutDirection() == Qt.LayoutDirection.RightToLeft:
+            label_option.rect.setRight(rect.left() - 10)
+        else:
+            label_option.rect.setLeft(rect.right() + 10)
         painter = QPainter(self)
-        self.style().drawControl(QStyle.ControlElement.CE_CheckBoxLabel, option, painter, self)
+        self.style().drawControl(QStyle.ControlElement.CE_CheckBoxLabel, label_option, painter, self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         state = self.checkState()
         color = QColor("#83d6ae" if state == Qt.CheckState.Checked else "#f1a1b0" if state == Qt.CheckState.PartiallyChecked else "#444955")

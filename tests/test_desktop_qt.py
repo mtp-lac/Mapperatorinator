@@ -11,10 +11,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEventLoop, QSettings, QTimer, Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from desktop.app import MainWindow
 from desktop.core import export_settings, validate_settings
+from desktop.credits import CreditsDialog
 from desktop.jobs import InferenceJob
 
 
@@ -167,6 +168,20 @@ class WindowTests(unittest.TestCase):
         start.assert_not_called()
         self.assertFalse(self.window.error_label.isHidden())
         self.assertFalse(self.window.job.running)
+
+    def test_help_about_opens_credits_page(self):
+        self.assertIn("Credits", self.window.about_action.text())
+        with patch.object(CreditsDialog, "exec", return_value=CreditsDialog.DialogCode.Accepted) as exec_dialog:
+            self.window.about_action.trigger()
+        exec_dialog.assert_called_once()
+        dialog = CreditsDialog(self.window)
+        try:
+            self.assertIn("Credits", dialog.windowTitle())
+            text = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+            for expected in ("OliBomby", "osuT5", "Hugging Face", "Jason Won", "Marvin", "osu!dreamer", "MIT License"):
+                self.assertIn(expected, text)
+        finally:
+            dialog.deleteLater()
 
 
 class JobTests(unittest.TestCase):
