@@ -352,6 +352,167 @@ class WorkerTests(unittest.TestCase):
         marker = stdout.getvalue().split("\nMAPPERATORINATOR_RESULT ", 1)[1]
         self.assertEqual(json.loads(marker), {"path": "output's 日本語.osu"})
 
+    def _model_cache_stubs(self):
+        class ContextType(Enum):
+            TIMING = "timing"
+            MAP = "map"
+            SV = "sv"
+
+        state = {
+            "load_calls": [],
+            "generate_calls": [],
+            "cleared_models": [],
+            "cuda_empty_calls": 0,
+        }
+
+        def make_cfg(model_name):
+            return types.SimpleNamespace(
+                model_path=f"OliBomby/Mapperatorinator-{model_name}",
+                lora_path=None,
+                auto_select_gamemode_model=True,
+                gamemode=0,
+                device="cpu",
+                precision="fp32",
+                attn_implementation="sdpa",
+                seed=42,
+                max_batch_size=16,
+                fast_decoder_loop=False,
+                generate_positions=False,
+                diff_ckpt="",
+                diff_refine_ckpt="",
+                compile=False,
+                train=types.SimpleNamespace(),
+                diffusion=types.SimpleNamespace(),
+                beatmap_path="",
+                audio_path="song.mp3",
+                difficulty=5.0,
+                temperature=0.9,
+                descriptors=None,
+                in_context=[],
+                output_type=[ContextType.MAP],
+                use_server=False,
+            )
+
+        @contextmanager
+        def initialize(**kwargs):
+            yield
+
+        def load_model_with_server(model_path, *args, **kwargs):
+            model_obj = {"model_path": model_path, "lora": kwargs.get("lora_path"), "gamemode": kwargs.get("gamemode")}
+            tok_obj = {"tokenizer_for": model_path}
+            state["load_calls"].append(model_obj)
+            return model_obj, tok_obj
+
+        def generate(cfg, **kwargs):
+            state["generate_calls"].append({
+                "model": kwargs["model"],
+                "difficulty": cfg.difficulty,
+                "temperature": cfg.temperature,
+                "descriptors": cfg.descriptors,
+                "seed": cfg.seed,
+            })
+            return "osu_data", Path(f"out-{cfg.difficulty}.osu")
+
+        def clear_decoder_cache(model):
+            state["cleared_models"].append(model)
+
+        stubs = {
+            "config": types.ModuleType("config"),
+            "hydra": types.SimpleNamespace(
+                compose=lambda config_name: make_cfg(config_name),
+                initialize_config_dir=initialize,
+            ),
+            "omegaconf": types.SimpleNamespace(OmegaConf=types.SimpleNamespace(to_object=lambda v: v)),
+            "osuT5": types.ModuleType("osuT5"),
+            "osuT5.osuT5": types.ModuleType("osuT5.osuT5"),
+            "osuT5.osuT5.event": types.SimpleNamespace(ContextType=ContextType),
+            "osuT5.osuT5.utils": types.SimpleNamespace(
+                resolve_model_checkpoint_path=lambda ckpt, gamemode=None, auto_select_gamemode_model=True: (ckpt, f"gamemode={gamemode}"),
+                get_model_checkpoint_subfolder=lambda ckpt, subfolder=None: subfolder or "",
+                resolve_compatible_lora_path=lambda lora, ckpt_subfolder=None, verbose=True: (lora, None),
+            ),
+            "osuT5.osuT5.inference": types.ModuleType("osuT5.osuT5.inference"),
+            "osuT5.osuT5.inference.compiled_decode": types.SimpleNamespace(clear_decoder_cache=clear_decoder_cache),
+            "inference": types.SimpleNamespace(
+                compile_args=lambda cfg: None,
+                setup_inference_environment=lambda seed: None,
+                load_model_with_server=load_model_with_server,
+                should_load_separate_timing_model=lambda cfg: False,
+                get_config=lambda cfg: ({"diff": cfg.difficulty}, {"title": "Test"}),
+                generate=generate,
+            ),
+            "torch": types.SimpleNamespace(
+                cuda=types.SimpleNamespace(
+                    is_available=lambda: True,
+                    empty_cache=lambda: state.__setitem__("cuda_empty_calls", state["cuda_empty_calls"] + 1),
+                )
+            ),
+        }
+        return stubs, state
+
+    def test_model_cache_reuses_for_new_values_and_unloads_on_switch(self):
+        stubs, state = self._model_cache_stubs()
+        cache = worker.ModelCache()
+        stdout = io.StringIO()
+        with patch.dict(sys.modules, stubs), redirect_stdout(stdout), patch.object(worker.gc, "collect") as gc_collect:
+            res1 = cache.run_request({"model": "v32", "overrides": {"difficulty": 5.0, "temperature": 0.9, "seed": 1}})
+            res2 = cache.run_request({"model": "v32", "overrides": {"difficulty": 6.5, "temperature": 0.7, "seed": 99, "descriptors": ["style/clean"]}})
+            self.assertEqual(len(state["load_calls"]), 1)
+            self.assertEqual(len(state["generate_calls"]), 2)
+            self.assertEqual(state["generate_calls"][0]["difficulty"], 5.0)
+            self.assertEqual(state["generate_calls"][1]["difficulty"], 6.5)
+            self.assertEqual(state["generate_calls"][1]["temperature"], 0.7)
+            self.assertEqual(state["generate_calls"][1]["descriptors"], ["style/clean"])
+            self.assertIs(state["generate_calls"][0]["model"], state["generate_calls"][1]["model"])
+            self.assertEqual(res1[1], Path("out-5.0.osu"))
+            self.assertEqual(res2[1], Path("out-6.5.osu"))
+
+            # Switching to another model unloads the first model immediately before loading the second.
+            first_model = cache.model
+            cache.run_request({"model": "v31", "overrides": {"difficulty": 4.2}})
+            self.assertEqual(len(state["load_calls"]), 2)
+            self.assertEqual(state["cleared_models"], [first_model])
+            self.assertGreaterEqual(gc_collect.call_count, 1)
+            self.assertGreaterEqual(state["cuda_empty_calls"], 1)
+            self.assertEqual(cache.model["model_path"], "OliBomby/Mapperatorinator-v31")
+
+            # Explicit unload clears references and emits UNLOADED_MARKER.
+            second_model = cache.model
+            self.assertTrue(cache.unload())
+            self.assertIsNone(cache.model)
+            self.assertIsNone(cache.tokenizer)
+            self.assertIsNone(cache.main_key)
+            self.assertEqual(state["cleared_models"], [first_model, second_model])
+            self.assertFalse(cache.unload())
+        text = stdout.getvalue()
+        self.assertIn("Reusing loaded Mapperatorinator V32", text)
+        self.assertIn("Switching model — unloading previous model...", text)
+        self.assertIn(worker.UNLOADED_MARKER, text)
+
+    def test_serve_loop_handles_run_unload_and_quit(self):
+        stubs, state = self._model_cache_stubs()
+        with tempfile.TemporaryDirectory() as directory:
+            req1 = Path(directory).resolve() / "req1.json"
+            req2 = Path(directory).resolve() / "req2.json"
+            req1.write_text(json.dumps({"model": "v32", "overrides": {"difficulty": 4.0}}), encoding="utf-8")
+            req2.write_text(json.dumps({"model": "v32", "overrides": {"difficulty": 6.0}}), encoding="utf-8")
+            stdin = io.StringIO(
+                json.dumps({"cmd": "run", "request_path": str(req1)}) + "\n"
+                + json.dumps({"cmd": "run", "request_path": str(req2)}) + "\n"
+                + json.dumps({"cmd": "unload"}) + "\n"
+                + json.dumps({"cmd": "quit"}) + "\n"
+            )
+            stdout = io.StringIO()
+            with patch.dict(sys.modules, stubs), redirect_stdout(stdout):
+                code = worker.serve(stdin=stdin)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(state["load_calls"]), 1)
+        self.assertEqual(len(state["generate_calls"]), 2)
+        out = stdout.getvalue()
+        self.assertIn(worker.READY_MARKER, out)
+        self.assertIn(worker.UNLOADED_MARKER, out)
+        self.assertEqual(out.count(worker.DONE_PREFIX), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
