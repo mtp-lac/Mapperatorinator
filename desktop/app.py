@@ -14,7 +14,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from desktop.core import DEFAULTS, MODELS, ROOT, export_settings, load_settings, read_reference, validate_settings
+from desktop.core import (
+    DEFAULTS, MODELS, ROOT, check_bf16_support, export_settings,
+    load_settings, optimal_compute_settings, read_reference, validate_settings,
+)
 from desktop.credits import CreditsDialog
 from desktop.descriptors import DescriptorPanel
 from desktop.jobs import InferenceJob
@@ -133,23 +136,49 @@ class MainWindow(QMainWindow):
         self.job.stage.connect(self._set_stage)
         self.job.progress.connect(self._set_progress)
         self.job.finished.connect(self._job_finished)
+        self.job.model_unloaded.connect(self._on_model_unloaded)
         self.clock = QTimer(self)
         self.clock.setInterval(1000)
         self.clock.timeout.connect(self._tick)
         self._build_menu()
         self._build_ui()
         initial = dict(DEFAULTS)
+        needs_save = False
         if restore:
+            cached_compute = None
+            try:
+                raw_compute = self.preferences.value("cachedOptimalCompute", "")
+                if raw_compute:
+                    cached_compute = json.loads(raw_compute)
+            except (ValueError, TypeError):
+                cached_compute = None
             try:
                 stored = self.preferences.value("generationSettings", "")
                 if stored:
                     initial = load_settings(json.loads(stored))
+                else:
+                    if not (isinstance(cached_compute, dict) and "device" in cached_compute and "precision" in cached_compute):
+                        bf16_info = check_bf16_support()
+                        detected = optimal_compute_settings()
+                        cached_compute = {
+                            "device": detected["device"],
+                            "precision": detected["precision"],
+                            "bf16": bf16_info,
+                        }
+                        self.preferences.setValue("cachedOptimalCompute", json.dumps(cached_compute, ensure_ascii=False))
+                    initial["device"] = cached_compute["device"]
+                    initial["precision"] = cached_compute["precision"]
+                    needs_save = True
             except (ValueError, TypeError, KeyError):
                 self.statusBar().showMessage("Saved settings could not be loaded. Using defaults.", 8000)
+            if isinstance(cached_compute, dict):
+                self._apply_compute_cache_label(cached_compute)
             geometry = self.preferences.value("geometry")
             if geometry:
                 self.restoreGeometry(geometry)
         self.apply_settings(initial)
+        if needs_save:
+            self._save_preferences()
         self.fields["model"].currentIndexChanged.connect(self._update_capabilities)
         self.fields["gamemode"].currentIndexChanged.connect(self._update_capabilities)
         self.fields["beatmap_path"].edit.textChanged.connect(self._update_capabilities)
@@ -415,7 +444,25 @@ class MainWindow(QMainWindow):
         self._field(form, "end_time", "End time (ms)", "End of song")
         form = self._form(layout, "Compute")
         self._field(form, "device", "Device", choices=[("Automatic", "auto"), ("NVIDIA / AMD GPU (CUDA)", "cuda"), ("CPU", "cpu"), ("Apple GPU (MPS)", "mps")])
-        self._field(form, "precision", "Precision", choices=[("FP32 — full precision", "fp32"), ("BF16 — supported GPUs", "bf16"), ("FP16 — half precision", "fp16"), ("AMP — mixed precision", "amp")])
+        self._field(form, "precision", "Precision", choices=[
+            ("Automatic (BF16 test)", "auto"),
+            ("FP32 — full precision", "fp32"),
+            ("BF16 — supported GPUs", "bf16"),
+            ("FP16 — half precision", "fp16"),
+            ("AMP — mixed precision", "amp"),
+        ])
+        compute_actions = QWidget()
+        compute_actions_layout = QHBoxLayout(compute_actions)
+        compute_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.detect_compute_button = QPushButton("Detect optimal device & BF16")
+        self.detect_compute_button.clicked.connect(lambda: self.detect_optimal_compute(refresh=True))
+        compute_actions_layout.addWidget(self.detect_compute_button)
+        compute_actions_layout.addStretch()
+        form.addRow("", compute_actions)
+        self.compute_status_label = QLabel("Select Automatic (BF16 test) or click Detect to test and cache GPU BF16 support.")
+        self.compute_status_label.setObjectName("hint")
+        self.compute_status_label.setWordWrap(True)
+        form.addRow("", self.compute_status_label)
         self._field(form, "fast_decoder_loop", "Use fast decoder loop", check=True, tooltip="CUDA optimization. The backend falls back where unsupported.")
         self._field(form, "super_timing_fast_loop", "Use fast decoder for super timing", check=True)
         note = QLabel("Generation runs one job at a time. The model loads for each run and GPU memory is released when the worker exits. The first run may download model weights.")
@@ -569,6 +616,34 @@ class MainWindow(QMainWindow):
     def _choose_audio(self):
         self.fields["audio_path"].browse()
 
+    def _format_compute_status(self, detected, bf16_info):
+        device = str(detected.get("device", "cpu")).upper()
+        precision = str(detected.get("precision", "fp32")).upper()
+        if bf16_info.get("supported"):
+            gpu_name = bf16_info.get("gpu_name") or ""
+            gpu_suffix = f" ({gpu_name})" if gpu_name else ""
+            return f"Optimal: {device} / {precision} — BF16 supported{gpu_suffix} (cached)."
+        reason = bf16_info.get("reason") or "BF16 unavailable"
+        return f"Optimal: {device} / {precision} — {reason} (cached)."
+
+    def _apply_compute_cache_label(self, payload):
+        if isinstance(payload, dict) and isinstance(payload.get("bf16"), dict):
+            self.compute_status_label.setText(self._format_compute_status(payload, payload["bf16"]))
+
+    def detect_optimal_compute(self, refresh=True):
+        bf16_info = check_bf16_support(use_cache=not refresh)
+        detected = optimal_compute_settings(use_cache=not refresh)
+        settings = self.settings()
+        settings.update(detected)
+        self.apply_settings(settings)
+        payload = {"device": detected["device"], "precision": detected["precision"], "bf16": bf16_info}
+        self.preferences.setValue("cachedOptimalCompute", json.dumps(payload, ensure_ascii=False))
+        self._save_preferences()
+        status = self._format_compute_status(detected, bf16_info)
+        self.compute_status_label.setText(status)
+        self.statusBar().showMessage(status, 8000)
+        return payload
+
     def import_settings(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import generation settings", str(ROOT), "JSON settings (*.json)")
         if not path:
@@ -692,6 +767,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 10000)
         if self._closing:
             QTimer.singleShot(0, self.close)
+
+    def _on_model_unloaded(self):
+        if self._closing:
+            return
+        message = "Model unloaded after 5 minutes of inactivity."
+        self._append_log(message)
+        self.statusBar().showMessage(message, 10000)
 
     def open_output(self):
         if self._last_output_dir:
