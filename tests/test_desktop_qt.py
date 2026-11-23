@@ -259,6 +259,109 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.results[0][0], "completed")
         self.assertIn("v32", self.outputs)
 
+    def _resident_script(self):
+        return (
+            "import json, os, pathlib, sys\n"
+            "print('MAPPERATORINATOR_READY', flush=True)\n"
+            "for line in iter(sys.stdin.readline, ''):\n"
+            "    line = line.strip()\n"
+            "    if not line:\n"
+            "        continue\n"
+            "    cmd = json.loads(line)\n"
+            "    if cmd['cmd'] == 'quit':\n"
+            "        print('Unloaded model from memory.', flush=True)\n"
+            "        print('MAPPERATORINATOR_UNLOADED', flush=True)\n"
+            "        break\n"
+            "    if cmd['cmd'] == 'run':\n"
+            "        req = json.loads(pathlib.Path(cmd['request_path']).read_text(encoding='utf-8'))\n"
+            "        model_name = req['model']\n"
+            "        diff = req['overrides'].get('difficulty')\n"
+            "        print(f'pid={os.getpid()} model={model_name} diff={diff}', flush=True)\n"
+            "        print('MAPPERATORINATOR_RESULT ' + json.dumps({'path': f'out-{model_name}.osu'}), flush=True)\n"
+            "        print('MAPPERATORINATOR_DONE ' + json.dumps({'status': 'completed', 'message': 'Generation complete.'}), flush=True)\n"
+        )
+
+    def test_resident_worker_reuses_process_and_unloads_after_idle_timeout(self):
+        job = InferenceJob(idle_timeout_ms=250)
+        outputs, results, unloaded = [], [], []
+        job.output.connect(outputs.append)
+        job.finished.connect(lambda *res: results.append(res))
+        job.model_unloaded.connect(lambda: unloaded.append(True))
+        try:
+            cmd = (sys.executable, ["-u", "-c", self._resident_script(), "--serve"])
+            with patch.object(job, "_command", return_value=cmd):
+                # First run spawns resident worker.
+                loop = QEventLoop()
+                job.finished.connect(lambda *_: loop.quit())
+                timer = QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(loop.quit)
+                timer.start(10000)
+                job.start("v32", {"difficulty": 5.0})
+                loop.exec()
+                timer.stop()
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0][0], "completed")
+                self.assertIsNotNone(job.process)
+                self.assertTrue(job._idle_timer.isActive())
+
+                # Second run reuses the same process PID without respawning.
+                loop2 = QEventLoop()
+                job.finished.connect(lambda *_: loop2.quit())
+                timer2 = QTimer()
+                timer2.setSingleShot(True)
+                timer2.timeout.connect(loop2.quit)
+                timer2.start(10000)
+                job.start("v32", {"difficulty": 7.5})
+                loop2.exec()
+                timer2.stop()
+                self.assertEqual(len(results), 2)
+                self.assertEqual(results[1][0], "completed")
+                pid_lines = [line for line in outputs if line.startswith("pid=")]
+                self.assertEqual(len(pid_lines), 2)
+                self.assertEqual(pid_lines[0].split()[0], pid_lines[1].split()[0])
+                self.assertIn("diff=7.5", pid_lines[1])
+
+                # Wait for idle timeout to unload the worker automatically.
+                unload_loop = QEventLoop()
+                job.model_unloaded.connect(unload_loop.quit)
+                unload_timer = QTimer()
+                unload_timer.setSingleShot(True)
+                unload_timer.timeout.connect(unload_loop.quit)
+                unload_timer.start(10000)
+                unload_loop.exec()
+                unload_timer.stop()
+                self.assertEqual(len(unloaded), 1)
+                self.assertIsNone(job.process)
+                self.assertIn("Unloaded model from memory.", outputs)
+                self.assertNotIn("MAPPERATORINATOR_UNLOADED", outputs)
+                self.assertNotIn("MAPPERATORINATOR_READY", outputs)
+        finally:
+            job.shutdown()
+
+    def test_shutdown_stops_idle_resident_worker(self):
+        job = InferenceJob(idle_timeout_ms=60000)
+        results = []
+        job.finished.connect(lambda *res: results.append(res))
+        try:
+            cmd = (sys.executable, ["-u", "-c", self._resident_script(), "--serve"])
+            with patch.object(job, "_command", return_value=cmd):
+                loop = QEventLoop()
+                job.finished.connect(lambda *_: loop.quit())
+                timer = QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(loop.quit)
+                timer.start(10000)
+                job.start("v32", {"difficulty": 5.0})
+                loop.exec()
+                timer.stop()
+                self.assertEqual(len(results), 1)
+                self.assertIsNotNone(job.process)
+                job.shutdown()
+                self.assertIsNone(job.process)
+        finally:
+            job.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
